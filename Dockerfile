@@ -3,10 +3,11 @@ FROM composer:2 AS vendor
 
 WORKDIR /app
 
-# Copiamos solo lo necesario para instalar dependencias
-COPY composer.json composer.lock ./
+# Copiamos todo el proyecto (excepto lo que ignora .dockerignore)
+COPY . .
 
-RUN composer install --no-dev --optimize-autoloader --no-interaction --no-progress
+# Instalamos dependencias de Laravel SIN ejecutar scripts (para evitar llamar a artisan aquí)
+RUN composer install --no-dev --optimize-autoloader --no-interaction --no-progress --no-scripts
 
 # Etapa 2: imagen final con PHP
 FROM php:8.2-cli
@@ -19,17 +20,11 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /var/www/html
 
-# Copiamos vendor desde la primera etapa
-COPY --from=vendor /app/vendor ./vendor
+# Copiamos TODO el proyecto ya con vendor desde la etapa anterior
+COPY --from=vendor /app . 
 
-# Copiamos el resto del proyecto
-COPY . .
-
-# Caching de configuración y rutas (opcional pero recomendado)
-RUN php artisan config:cache || true \
- && php artisan route:cache || true
-
-# Render detecta el puerto, usamos el 8000 con php artisan serve
+# Exponemos el puerto donde va a escuchar php artisan serve
 EXPOSE 8000
 
+# Comando de arranque
 CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8000"]
