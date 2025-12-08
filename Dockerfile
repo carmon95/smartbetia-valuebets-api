@@ -3,14 +3,14 @@ FROM composer:2 AS vendor
 
 WORKDIR /app
 
-# Copiamos todo el proyecto (excepto lo que ignora .dockerignore)
+# Copiamos todo el proyecto (respeta lo que ignore .dockerignore)
 COPY . .
 
-# Instalamos dependencias de Laravel SIN ejecutar scripts (para evitar llamar a artisan aquí)
+# Instalamos dependencias de Laravel SIN ejecutar scripts
 RUN composer install --no-dev --optimize-autoloader --no-interaction --no-progress --no-scripts
 
-# Etapa 2: imagen final con PHP
-FROM php:8.2-cli
+# Etapa 2: imagen final con PHP 8.4
+FROM php:8.4-cli
 
 # Instalar extensiones necesarias para Laravel + PostgreSQL
 RUN apt-get update && apt-get install -y \
@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /var/www/html
 
 # Copiamos TODO el proyecto ya con vendor desde la etapa anterior
-COPY --from=vendor /app . 
+COPY --from=vendor /app .
 
 # Exponemos el puerto donde va a escuchar php artisan serve
 EXPOSE 8000
