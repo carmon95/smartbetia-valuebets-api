@@ -23,6 +23,12 @@ WORKDIR /var/www/html
 # Copiamos TODO el proyecto ya con vendor desde la etapa anterior
 COPY --from=vendor /app .
 
+# 🔹 Crear las carpetas de cache que Laravel necesita
+RUN mkdir -p storage/framework/cache \
+    storage/framework/sessions \
+    storage/framework/views \
+ && chmod -R 775 storage bootstrap/cache
+
 # Exponemos el puerto donde va a escuchar php artisan serve
 EXPOSE 8000
 
