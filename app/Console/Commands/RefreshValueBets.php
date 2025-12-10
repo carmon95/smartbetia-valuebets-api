@@ -25,6 +25,7 @@ class RefreshValueBets extends Command
         $this->info('Obteniendo cuotas desde The Odds API...');
 
         try {
+            // 🔹 AHORA fetchOdds() devolverá eventos de varios deportes
             $events = $this->client->fetchOdds();
         } catch (\Throwable $e) {
             $this->error('Error llamando a The Odds API: ' . $e->getMessage());
@@ -37,6 +38,16 @@ class RefreshValueBets extends Command
         }
 
         $minEdge = config('odds.min_edge', 0.05);
+
+        // 🔹 OPCIONAL: lista de deportes que quieres conservar
+        $allowedSports = [
+            'basketball_nba',
+            'americanfootball_nfl',
+            'soccer_spain_la_liga',
+            // agrega aquí más keys soportadas por The Odds API
+            // 'soccer_england_premier_league',
+            // 'soccer_italy_serie_a',
+        ];
 
         // Por simplicidad, borramos y volvemos a poblar
         ValueBet::truncate();
@@ -51,6 +62,17 @@ class RefreshValueBets extends Command
             $kickoffIso = $event['commence_time'] ?? null;          // ISO string
             $kickoffAt  = $kickoffIso ? Carbon::parse($kickoffIso) : null;
             $sportKey   = $event['sport_key'] ?? 'unknown';         // ej: soccer_spain_la_liga, basketball_nba
+
+            // 🔹 Filtrar deportes que no queremos
+            if (!in_array($sportKey, $allowedSports, true)) {
+                continue;
+            }
+
+            // 🔹 NO insertar partidos demasiado viejos
+            //    (ej. más de 2 horas en el pasado)
+            if ($kickoffAt && $kickoffAt->lt(now()->subHours(2))) {
+                continue;
+            }
 
             if (empty($event['bookmakers']) || !is_array($event['bookmakers'])) {
                 continue;
@@ -83,8 +105,8 @@ class RefreshValueBets extends Command
                             continue;
                         }
 
-                        // 👉 NUEVO: obtener la línea si existe (totals / spreads)
-                        $line = isset($outcome['point']) ? (float) $outcome['point'] : null; // 👈
+                        // 👉 Línea si existe (totals / spreads)
+                        $line = isset($outcome['point']) ? (float) $outcome['point'] : null;
 
                         // 2) Evitar cuotas absurdamente altas (ej. > 50.0)
                         if ($odds > 50.0) {
@@ -104,10 +126,10 @@ class RefreshValueBets extends Command
 
                         if ($isNbaTotalsOver) {
                             if ($line === null) {
-                                // Sin línea no podemos usar el modelo → fallback a heurística
+                                // Sin línea no podemos usar el modelo → heurística
                                 $modelProb = $this->estimateModelProbability($odds);
                             } else {
-                                // Llamamos al modelo de Python
+                                // Llamamos al modelo de Python SOLO para NBA totals Over
                                 $prob = $this->predictNbaOver($line, $odds);
                                 // Si algo falla, usamos la heurística
                                 $modelProb = $prob ?? $this->estimateModelProbability($odds);
@@ -125,8 +147,13 @@ class RefreshValueBets extends Command
 
                         $riskLabel   = $this->riskFromProbability($modelProb);
 
-                        // 👉 NUEVO: label que incluye la línea cuando aplique
-                        $marketLabel = $this->formatMarketLabel($marketKey, $outcomeName, $line, $sportKey); // 👈
+                        // Label que incluye la línea cuando aplique
+                        $marketLabel = $this->formatMarketLabel(
+                            $marketKey,
+                            $outcomeName,
+                            $line,
+                            $sportKey
+                        );
 
                         ValueBet::create([
                             'sport'               => $sportKey,
@@ -141,7 +168,7 @@ class RefreshValueBets extends Command
                             'risk_label'          => $riskLabel,
                             'kickoff_at'          => $kickoffAt,
                             'is_active'           => true,
-                            'total_line'          => $line, // 👈 GUARDAMOS LA LÍNEA EN LA TABLA
+                            'total_line'          => $line,
                         ]);
 
                         $insertCount++;
@@ -163,7 +190,7 @@ class RefreshValueBets extends Command
     {
         try {
             $client = new \GuzzleHttp\Client([
-                'base_uri' => 'http://127.0.0.1:8001',
+                'base_uri' => 'http://127.0.0.1:8001', // cámbialo por tu URL pública cuando lo subas
                 'timeout'  => 2.0,
             ]);
 
@@ -188,10 +215,6 @@ class RefreshValueBets extends Command
         }
     }
 
-    /**
-     * Modelo heurístico simple solo para empezar.
-     * Luego aquí podemos meter algo mucho más pro.
-     */
     protected function estimateModelProbability(float $odds): float
     {
         return match (true) {
@@ -213,19 +236,19 @@ class RefreshValueBets extends Command
         };
     }
 
-    // 👇 AHORA RECIBE TAMBIÉN $line y $sportKey
-    protected function formatMarketLabel(string $marketKey, string $outcomeName, ?float $line = null, ?string $sportKey = null): string
-    {
-        // Normalizamos algunos textos
+    protected function formatMarketLabel(
+        string $marketKey,
+        string $outcomeName,
+        ?float $line = null,
+        ?string $sportKey = null
+    ): string {
         $sportKey = $sportKey ?? '';
 
-        // Si hay línea, la formateamos bonito (sin ceros de más)
         $lineFormatted = null;
         if ($line !== null) {
             $lineFormatted = rtrim(rtrim((string)$line, '0'), '.');
         }
 
-        // Sufijo para diferenciar puntos / goles
         $suffix = '';
         if (str_starts_with($sportKey, 'basketball_') || str_starts_with($sportKey, 'americanfootball_')) {
             $suffix = ' pts';
@@ -237,11 +260,11 @@ class RefreshValueBets extends Command
             'h2h'    => "Ganador del partido - {$outcomeName}",
 
             'totals' => $lineFormatted !== null
-                ? "Total {$outcomeName} {$lineFormatted}{$suffix}"   // 👈 Ej: Total Over 2.5 goles / Total Over 224.5 pts
-                : "Línea de goles/puntos - {$outcomeName}",          // fallback,
+                ? "Total {$outcomeName} {$lineFormatted}{$suffix}"
+                : "Línea de goles/puntos - {$outcomeName}",
 
             'spreads'=> $lineFormatted !== null
-                ? "Hándicap {$outcomeName} {$lineFormatted}"         // Ej: Hándicap Elche CF +1.5
+                ? "Hándicap {$outcomeName} {$lineFormatted}"
                 : "Hándicap - {$outcomeName}",
 
             default  => "{$marketKey} - {$outcomeName}",

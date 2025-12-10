@@ -10,7 +10,14 @@ class ValueBetController extends Controller
 {
     public function index(Request $request)
     {
-        $query = ValueBet::query()->where('is_active', true);
+        // Punto de corte de fechas:
+        // solo mostrar partidos cuyo kickoff sea desde el inicio del día de hoy en adelante
+        $cutoff = now()->startOfDay();
+
+        $query = ValueBet::query()
+            ->where('is_active', true)
+            // 👇 NO devolver partidos que ya fueron de días anteriores
+            ->where('kickoff_at', '>=', $cutoff);
 
         // Filtro opcional por deporte
         if ($sport = $request->query('sport')) {
