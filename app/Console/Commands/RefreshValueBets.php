@@ -40,7 +40,7 @@ class RefreshValueBets extends Command
         return Command::SUCCESS;
     }
 
-    $minEdge = config('odds.min_edge', 0.05);
+   $minEdge = 0.0; // 👈 SOLO para debug, aceptar cualquier edge
 
     $allowedSports = [
         'basketball_nba',
