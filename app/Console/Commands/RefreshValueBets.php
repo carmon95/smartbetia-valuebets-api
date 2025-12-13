@@ -18,149 +18,109 @@ class RefreshValueBets extends Command
         parent::__construct();
     }
 
-    public function handle(): int
-    {
-        \Log::info('RefreshValueBets ejecutado a las ' . now());
+   public function handle(): int
+{
+    \Log::info('RefreshValueBets ejecutado a las ' . now());
+    $this->info('Obteniendo cuotas desde The Odds API...');
 
-        $this->info('Obteniendo cuotas desde The Odds API...');
+    try {
+        $events = $this->client->fetchOdds();
+    } catch (\Throwable $e) {
+        $this->error('Error llamando a The Odds API: ' . $e->getMessage());
+        return Command::FAILURE;
+    }
 
-        try {
-            // 🔹 AHORA fetchOdds() devolverá eventos de varios deportes
-            $events = $this->client->fetchOdds();
-        } catch (\Throwable $e) {
-            $this->error('Error llamando a The Odds API: ' . $e->getMessage());
-            return Command::FAILURE;
+    if (empty($events)) {
+        $this->warn('No se recibieron eventos.');
+        return Command::SUCCESS;
+    }
+
+    $minEdge = config('odds.min_edge', 0.05);
+
+    $allowedSports = [
+        'basketball_nba',
+        'americanfootball_nfl',
+        'soccer_spain_la_liga',
+    ];
+
+    // 🧹 LIMPIEZA INTELIGENTE (NO truncate)
+    $deleted = ValueBet::whereNotNull('kickoff_at')
+        ->where('kickoff_at', '<', now()->subHours(2))
+        ->delete();
+
+    $this->info("Partidos antiguos eliminados: {$deleted}");
+
+    $upsertCount = 0;
+
+    foreach ($events as $event) {
+        $league     = $event['sport_title'] ?? 'Desconocido';
+        $homeTeam   = $event['home_team'] ?? 'Local';
+        $awayTeam   = $event['away_team'] ?? 'Visitante';
+        $match      = "{$homeTeam} vs {$awayTeam}";
+        $kickoffIso = $event['commence_time'] ?? null;
+        $kickoffAt  = $kickoffIso ? Carbon::parse($kickoffIso) : null;
+        $sportKey   = $event['sport_key'] ?? 'unknown';
+
+        if (!in_array($sportKey, $allowedSports, true)) {
+            continue;
         }
 
-        if (empty($events)) {
-            $this->warn('No se recibieron eventos.');
-            return Command::SUCCESS;
+        if ($kickoffAt && $kickoffAt->lt(now()->subHours(2))) {
+            continue;
         }
 
-        $minEdge = config('odds.min_edge', 0.05);
+        foreach ($event['bookmakers'] ?? [] as $bookmaker) {
+            $bookmakerName = $bookmaker['title'] ?? 'Bookmaker';
 
-        // 🔹 OPCIONAL: lista de deportes que quieres conservar
-        $allowedSports = [
-            'basketball_nba',
-            'americanfootball_nfl',
-            'soccer_spain_la_liga',
-            // agrega aquí más keys soportadas por The Odds API
-            // 'soccer_england_premier_league',
-            // 'soccer_italy_serie_a',
-        ];
+            foreach ($bookmaker['markets'] ?? [] as $market) {
+                $marketKey = $market['key'] ?? 'unknown';
 
-        // Por simplicidad, borramos y volvemos a poblar
-        ValueBet::truncate();
-
-        $insertCount = 0;
-
-        foreach ($events as $event) {
-            $league     = $event['sport_title'] ?? 'Desconocido';   // ej: La Liga - Spain / NBA
-            $homeTeam   = $event['home_team'] ?? 'Local';
-            $awayTeam   = $event['away_team'] ?? 'Visitante';
-            $match      = "{$homeTeam} vs {$awayTeam}";
-            $kickoffIso = $event['commence_time'] ?? null;          // ISO string
-            $kickoffAt  = $kickoffIso ? Carbon::parse($kickoffIso) : null;
-            $sportKey   = $event['sport_key'] ?? 'unknown';         // ej: soccer_spain_la_liga, basketball_nba
-
-            // 🔹 Filtrar deportes que no queremos
-            if (!in_array($sportKey, $allowedSports, true)) {
-                continue;
-            }
-
-            // 🔹 NO insertar partidos demasiado viejos
-            //    (ej. más de 2 horas en el pasado)
-            if ($kickoffAt && $kickoffAt->lt(now()->subHours(2))) {
-                continue;
-            }
-
-            if (empty($event['bookmakers']) || !is_array($event['bookmakers'])) {
-                continue;
-            }
-
-            foreach ($event['bookmakers'] as $bookmaker) {
-                $bookmakerName = $bookmaker['title'] ?? 'Bookmaker';
-
-                if (empty($bookmaker['markets']) || !is_array($bookmaker['markets'])) {
+                if (!in_array($marketKey, ['h2h', 'totals', 'spreads'])) {
                     continue;
                 }
 
-                foreach ($bookmaker['markets'] as $market) {
-                    $marketKey = $market['key'] ?? 'unknown';  // h2h, totals, spreads, h2h_lay...
+                foreach ($market['outcomes'] ?? [] as $outcome) {
+                    $outcomeName = $outcome['name'] ?? 'Outcome';
+                    $odds = isset($outcome['price']) ? (float) $outcome['price'] : null;
 
-                    // 1) Solo queremos mercados clásicos, NO lay ni cosas raras
-                    if (!in_array($marketKey, ['h2h', 'totals', 'spreads'])) {
+                    if (!$odds || $odds <= 1.0 || $odds > 50.0) {
                         continue;
                     }
 
-                    if (empty($market['outcomes']) || !is_array($market['outcomes'])) {
+                    $line = isset($outcome['point']) ? (float) $outcome['point'] : null;
+                    $implied = 1 / $odds;
+
+                    $isNbaTotalsOver =
+                        $sportKey === 'basketball_nba' &&
+                        $marketKey === 'totals' &&
+                        stripos($outcomeName, 'Over') !== false;
+
+                    if ($isNbaTotalsOver) {
+                        $modelProb = $line !== null
+                            ? $this->predictNbaOver($line, $odds) ?? $this->estimateModelProbability($odds)
+                            : $this->estimateModelProbability($odds);
+                    } else {
+                        $modelProb = $this->estimateModelProbability($odds);
+                    }
+
+                    $edge = $modelProb - $implied;
+                    if ($edge < $minEdge) {
                         continue;
                     }
 
-                    foreach ($market['outcomes'] as $outcome) {
-                        $outcomeName = $outcome['name'] ?? 'Outcome';
-                        $odds        = isset($outcome['price']) ? (float) $outcome['price'] : null;
+                    $riskLabel = $this->riskFromProbability($modelProb);
+                    $marketLabel = $this->formatMarketLabel($marketKey, $outcomeName, $line, $sportKey);
 
-                        if ($odds === null || $odds <= 1.0) {
-                            continue;
-                        }
-
-                        // 👉 Línea si existe (totals / spreads)
-                        $line = isset($outcome['point']) ? (float) $outcome['point'] : null;
-
-                        // 2) Evitar cuotas absurdamente altas (ej. > 50.0)
-                        if ($odds > 50.0) {
-                            continue;
-                        }
-
-                        // Probabilidad implícita
-                        $implied = 1.0 / $odds;
-
-                        // ============================
-                        // ¿Es un TOTAL de NBA (Over)?
-                        // ============================
-                        $isNbaTotalsOver =
-                            $sportKey === 'basketball_nba' &&           // solo NBA
-                            $marketKey === 'totals' &&                  // mercado totals
-                            stripos($outcomeName, 'Over') !== false;    // lado Over
-
-                        if ($isNbaTotalsOver) {
-                            if ($line === null) {
-                                // Sin línea no podemos usar el modelo → heurística
-                                $modelProb = $this->estimateModelProbability($odds);
-                            } else {
-                                // Llamamos al modelo de Python SOLO para NBA totals Over
-                                $prob = $this->predictNbaOver($line, $odds);
-                                // Si algo falla, usamos la heurística
-                                $modelProb = $prob ?? $this->estimateModelProbability($odds);
-                            }
-                        } else {
-                            // Para todo lo que NO sea totals de NBA Over → heurística vieja
-                            $modelProb = $this->estimateModelProbability($odds);
-                        }
-
-                        $edge = $modelProb - $implied;
-
-                        if ($edge < $minEdge) {
-                            continue; // no es value bet
-                        }
-
-                        $riskLabel   = $this->riskFromProbability($modelProb);
-
-                        // Label que incluye la línea cuando aplique
-                        $marketLabel = $this->formatMarketLabel(
-                            $marketKey,
-                            $outcomeName,
-                            $line,
-                            $sportKey
-                        );
-
-                        ValueBet::create([
-                            'sport'               => $sportKey,
+                    // ✅ UPSERT en lugar de CREATE
+                    ValueBet::updateOrCreate(
+                        [
+                            'sport'     => $sportKey,
+                            'match'     => $match,
+                            'market'    => $marketLabel,
+                            'bookmaker' => $bookmakerName,
+                        ],
+                        [
                             'league'              => $league,
-                            'match'               => $match,
-                            'market'              => $marketLabel,
-                            'bookmaker'           => $bookmakerName,
                             'odds'                => $odds,
                             'implied_probability' => $implied,
                             'model_probability'   => $modelProb,
@@ -169,18 +129,18 @@ class RefreshValueBets extends Command
                             'kickoff_at'          => $kickoffAt,
                             'is_active'           => true,
                             'total_line'          => $line,
-                        ]);
+                        ]
+                    );
 
-                        $insertCount++;
-                    }
+                    $upsertCount++;
                 }
             }
         }
-
-        $this->info("Value bets insertadas: {$insertCount}.");
-
-        return Command::SUCCESS;
     }
+
+    $this->info("Value bets actualizadas/insertadas: {$upsertCount}");
+    return Command::SUCCESS;
+}
 
     /**
      * Llama al servicio de IA en Python para estimar la probabilidad del Over en NBA.
