@@ -30,6 +30,11 @@ class RefreshValueBets extends Command
         return Command::FAILURE;
     }
 
+    // 👇 AGREGA ESTO AQUÍ
+\Log::info('Sports keys recibidos', [
+    'sports' => collect($events)->pluck('sport_key')->unique()->values()->all()
+]);
+
     if (empty($events)) {
         $this->warn('No se recibieron eventos.');
         return Command::SUCCESS;
