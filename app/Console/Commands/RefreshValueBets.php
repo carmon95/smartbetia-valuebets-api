@@ -64,9 +64,9 @@ class RefreshValueBets extends Command
         if (!in_array($sportKey, $allowedSports, true)) {
             continue;
         }
-
-        if ($kickoffAt && $kickoffAt->lt(now()->subHours(2))) {
-            continue;
+        // 🔹 Excluir solo partidos YA FINALIZADOS hace mucho
+        if ($kickoffAt && $kickoffAt->lt(now()->subHours(10))) {
+        continue;
         }
 
         foreach ($event['bookmakers'] ?? [] as $bookmaker) {
