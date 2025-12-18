@@ -55,7 +55,8 @@ class RefreshValueBets extends Command
 
             $kickoffAt = isset($event['commence_time'])
             ? Carbon::parse($event['commence_time'], 'UTC')
-            ->setTimezone('America/Managua')
+             ->subHours(6)
+             ->setTimezone('America/Managua')
             : null;
 
             // 🔹 Excluir solo partidos MUY viejos
